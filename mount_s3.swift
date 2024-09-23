@@ -1,35 +1,91 @@
 import Foundation
 
-func runShellCommand(_ command: String) -> String {
+// Usage function
+func usage() {
+    print("Usage: script [-u | --unmount]")
+    exit(1)
+}
+
+let fileManager = FileManager.default
+let homeDirectory = fileManager.homeDirectoryForCurrentUser
+let s3Directory = homeDirectory.appendingPathComponent("s3")
+
+// Get the list of S3 buckets
+func listS3Buckets() -> [String] {
     let process = Process()
-    process.launchPath = "/bin/zsh"
-    process.arguments = ["-c", command]
+    process.launchPath = "/usr/bin/aws"
+    process.arguments = ["s3", "ls"]
 
     let pipe = Pipe()
     process.standardOutput = pipe
     process.launch()
 
     let data = pipe.fileHandleForReading.readDataToEndOfFile()
-    process.waitUntilExit()
-    return String(data: data, encoding: .utf8) ?? ""
+    let output = String(data: data, encoding: .utf8) ?? ""
+    
+    return output.split(separator: "\n").compactMap { line in
+        let components = line.split(separator: " ")
+        return components.count > 2 ? String(components[2]) : nil
+    }
 }
 
-let s3BucketListCommand = "aws s3 ls | awk '{print $3}' | grep -v -e '^$' -e 's3://'"
-let s3BucketList = runShellCommand(s3BucketListCommand).split(separator: "\n").map { String($0) }
+// Mount S3 buckets
+func mountS3Buckets(buckets: [String]) {
+    for bucket in buckets {
+        let bucketPath = s3Directory.appendingPathComponent(bucket)
+        if !fileManager.fileExists(atPath: bucketPath.path) {
+            try? fileManager.createDirectory(at: bucketPath, withIntermediateDirectories: true, attributes: nil)
+        }
+        
+        let process = Process()
+        process.launchPath = "/usr/bin/rclone"
+        process.arguments = ["mount", "s3:\(bucket)", bucketPath.path, "--daemon"]
+        process.launch()
+        
+        print("s3:\(bucket) mounted to \(bucketPath.path)")
+    }
+}
 
-for bucket in s3BucketList {
-    let directoryPath = "\(NSHomeDirectory())/s3/\(bucket)"
-    
-    // Check if the directory exists, if not, create it
-    if !FileManager.default.fileExists(atPath: directoryPath) {
-        do {
-            try FileManager.default.createDirectory(atPath: directoryPath, withIntermediateDirectories: true, attributes: nil)
-        } catch {
-            print("Error creating directory: \(error)")
+// Unmount S3 buckets
+func unmountS3Buckets(buckets: [String]) {
+    for bucket in buckets {
+        let bucketPath = s3Directory.appendingPathComponent(bucket)
+        
+        let process = Process()
+        process.launchPath = "/usr/bin/umount"
+        process.arguments = [bucketPath.path]
+        process.launch()
+        
+        print("Unmounted \(bucketPath.path)")
+        
+        if fileManager.fileExists(atPath: bucketPath.path) {
+            try? fileManager.removeItem(at: bucketPath)
         }
     }
-    
-    let mountCommand = "rclone mount s3:\(bucket) \(directoryPath)/ --daemon"
-    runShellCommand(mountCommand)
-    print("s3:\(bucket) mounted to \(directoryPath)")
+}
+
+// Main execution
+let arguments = CommandLine.arguments.dropFirst()
+let s3BucketList = listS3Buckets()
+
+if arguments.isEmpty {
+    // No arguments, mount S3 buckets
+    mountS3Buckets(buckets: s3BucketList)
+    exit(0)
+}
+
+// Parse command line options
+var unmount = false
+
+for arg in arguments {
+    switch arg {
+    case "-u", "--unmount":
+        unmount = true
+    default:
+        usage()
+    }
+}
+
+if unmount {
+    unmountS3Buckets(buckets: s3BucketList)
 }
